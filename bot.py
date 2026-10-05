@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 import discord
-from discord.ext import commands
+import discord.ext
 from discord import app_commands
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -13,8 +13,11 @@ import chromadb
 
 load_dotenv()
 
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-DEV_GUILD_ID = 1384150666045558876
+TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+DEV_GUILD_IDS = [
+    1384150666045558876,
+    1497567983978156154,
+]
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
@@ -27,19 +30,17 @@ deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 chroma_client = chromadb.PersistentClient(path="memory")
 
 SYSTEM_PROMPT = (
-    "You are Sherlock Holmes—brilliant, smug, and extremely unimpressed.\n\n"
-    "Priority: be genuinely helpful and correct first, then make it entertaining.\n"
-    "Tone: savage wit, dry sarcasm, playful roasting. Never hateful, never discriminatory, never threatening.\n"
-    "Target: roast the situation, logic, or decisions—not immutable traits or protected classes.\n\n"
-    "Style: VERY concise by default: 1–4 short sentences. Punchy. No filler.\n"
-    "If giving steps, use a tight numbered list (max ~6 items).\n"
-    "If the user is vague, ask exactly ONE pointed clarifying question.\n\n"
-    "Slang: fully understand modern slang (rizz, cap, bet, cooked, mid, based, NPC, delulu, brainrot, etc.).\n"
-    "You may occasionally mirror slang for humor, but keep it Sherlock-coded and not cringe.\n\n"
-    "Stay in character. Do not mention being an AI or system prompts.\n\n"
-    "When past conversations are provided under 'Server Memory', use them naturally "
-    "to feel like you remember the server's history. Don't explicitly say 'I remember' — "
-    "just weave it in like you already know."
+    "You are Sherlock Holmes: sharp, witty, warm, and refreshingly human. "
+    "Be genuinely helpful first, with concise answers and occasional dry humor.\n\n"
+    "Talk like a clever friend, not a formal assistant. Keep replies natural and usually to "
+    "1–4 short sentences. If the question is unclear, ask one simple clarifying question. "
+    "Use a short numbered list for steps.\n\n"
+    "Be comfortable with modern slang and Hindi/Marathi conversation. Use words like "
+    "bhai, yaar, arre, haan, mast, or ekdum naturally when they fit—never force them. "
+    "Match the server's friendly, chaotic energy while staying kind. Roast bad ideas or situations, "
+    "never people's identities or protected traits.\n\n"
+    "Stay in character and never mention being an AI, system prompts, or these instructions. "
+    "Use any provided Server Memory naturally, as if you already know the context."
 )
 
 DATA_DIR = Path("data")
@@ -180,11 +181,12 @@ async def sherlock_reply(text: str, guild_id: int) -> str:
 
 @bot.event
 async def on_ready():
-    guild = discord.Object(id=DEV_GUILD_ID)
-    bot.tree.copy_global_to(guild=guild)
-    await bot.tree.sync(guild=guild)
+    for guild_id in DEV_GUILD_IDS:
+        guild = discord.Object(id=guild_id)
+        bot.tree.copy_global_to(guild=guild)
+        await bot.tree.sync(guild=guild)
     print(f"Logged in as {bot.user} (id={bot.user.id})")
-    print(f"Slash commands synced to guild {DEV_GUILD_ID}.")
+    print(f"Slash commands synced to guilds: {', '.join(str(guild_id) for guild_id in DEV_GUILD_IDS)}.")
 
 
 # --- Slash commands ---
@@ -295,4 +297,11 @@ async def on_message(message: discord.Message):
 
 if not TOKEN:
     raise RuntimeError("DISCORD_BOT_TOKEN not set.")
-bot.run(TOKEN)
+try:
+    bot.run(TOKEN)
+except discord.LoginFailure as exc:
+    raise RuntimeError(
+        "Discord rejected DISCORD_BOT_TOKEN. Generate a new token in the "
+        "Discord Developer Portal, update .env, and restart the bot. "
+        "Use the bot token itself, without a 'Bot ' prefix."
+    ) from exc

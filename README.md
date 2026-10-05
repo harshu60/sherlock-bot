@@ -45,3 +45,18 @@ sherlock-bot/
 ├── requirements.txt   # Locked project dependencies
 └── .env.example       # Template for required environme
 nt variables
+```
+
+### Discord token setup
+
+Set `DISCORD_BOT_TOKEN` in `.env` to the token from the **Bot** page of the
+same application whose bot is invited to the server:
+
+```dotenv
+DISCORD_BOT_TOKEN=your_bot_token
+```
+
+Use the token value itself; do not include the `Bot ` prefix. If startup fails
+with `Improper token has been passed`, regenerate the bot token in the Discord
+Developer Portal, replace the value in `.env`, and restart the process. A
+previous token is invalidated when it is regenerated.
