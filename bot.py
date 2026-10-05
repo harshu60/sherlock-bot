@@ -6,6 +6,7 @@ from pathlib import Path
 
 import discord
 import discord.ext
+from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 from openai import OpenAI
