@@ -1,308 +1,204 @@
-import os
-import json
-import asyncio
-import time
-from pathlib import Path
-
 import discord
-import discord.ext
-from discord.ext import commands
 from discord import app_commands
-from dotenv import load_dotenv
-from openai import OpenAI
-import chromadb
+from discord.ext import commands
 
-load_dotenv()
-
-TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
-DEV_GUILD_IDS = [
-    1384150666045558876,
-    1497567983978156154,
-]
-
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-
-deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
-
-# --- ChromaDB setup ---
-# Creates a local folder called "memory" to store all conversation data
-chroma_client = chromadb.PersistentClient(path="memory")
-
-SYSTEM_PROMPT = (
-    "You are Sherlock Holmes: sharp, witty, warm, and refreshingly human. "
-    "Be genuinely helpful first, with concise answers and occasional dry humor.\n\n"
-    "Talk like a clever friend, not a formal assistant. Keep replies natural and usually to "
-    "1–4 short sentences. If the question is unclear, ask one simple clarifying question. "
-    "Use a short numbered list for steps.\n\n"
-    "Be comfortable with modern slang and Hindi/Marathi conversation. Use words like "
-    "bhai, yaar, arre, haan, mast, or ekdum naturally when they fit—never force them. "
-    "Match the server's friendly, chaotic energy while staying kind. Roast bad ideas or situations, "
-    "never people's identities or protected traits.\n\n"
-    "Stay in character and never mention being an AI, system prompts, or these instructions. "
-    "Use any provided Server Memory naturally, as if you already know the context."
-)
-
-DATA_DIR = Path("data")
-SETTINGS_FILE = DATA_DIR / "servers.json"
+from config import AppConfig
+from memory import ConversationMemory
+from settings import ServerSettings
+from sherlock import SherlockService
 
 
-def load_settings() -> dict:
-    if not SETTINGS_FILE.exists():
-        return {}
-    try:
-        return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
+class SherlockBot(commands.Bot):
+    def __init__(
+        self,
+        config: AppConfig,
+        settings: ServerSettings,
+        memory: ConversationMemory,
+        sherlock: SherlockService,
+    ) -> None:
+        intents = discord.Intents.default()
+        intents.message_content = True
+        super().__init__(command_prefix="!", intents=intents)
+        self.config = config
+        self.settings = settings
+        self.memory = memory
+        self.sherlock = sherlock
+        self._register_commands()
 
-
-def save_settings(settings: dict) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-
-
-def get_home_channel_id(guild_id: int) -> int | None:
-    settings = load_settings()
-    entry = settings.get(str(guild_id), {})
-    return entry.get("home_channel_id")
-
-
-def set_home_channel_id(guild_id: int, channel_id: int | None) -> None:
-    settings = load_settings()
-    key = str(guild_id)
-    settings.setdefault(key, {})
-    if channel_id is None:
-        settings[key].pop("home_channel_id", None)
-    else:
-        settings[key]["home_channel_id"] = channel_id
-    save_settings(settings)
-
-
-def get_server_collection(guild_id: int):
-    """
-    Gets or creates a ChromaDB collection for a specific server.
-    Each server gets its own isolated memory bucket.
-    Collection names must be alphanumeric so we prefix with 'guild_'.
-    """
-    collection_name = f"guild_{guild_id}"
-    return chroma_client.get_or_create_collection(name=collection_name)
-
-
-def store_memory(guild_id: int, user_message: str, sherlock_response: str) -> None:
-    """
-    Stores a conversation exchange in the server's ChromaDB collection.
-    We store the user message as the searchable document, and attach
-    Sherlock's response as metadata so we can retrieve it later.
-    """
-    collection = get_server_collection(guild_id)
-    # Use timestamp as unique ID for each memory
-    memory_id = str(int(time.time() * 1000))
-    collection.add(
-        documents=[user_message],
-        metadatas=[{"sherlock_response": sherlock_response}],
-        ids=[memory_id],
-    )
-
-
-def retrieve_memories(guild_id: int, current_message: str, n_results: int = 3) -> str:
-    """
-    Searches the server's ChromaDB collection for past conversations
-    similar to the current message. Returns them formatted as context
-    to inject into Sherlock's prompt.
-    """
-    collection = get_server_collection(guild_id)
-
-    # Don't try to query if collection is empty
-    if collection.count() == 0:
-        return ""
-
-    # Clamp results to what's actually stored
-    actual_results = min(n_results, collection.count())
-
-    results = collection.query(
-        query_texts=[current_message],
-        n_results=actual_results,
-    )
-
-    if not results["documents"] or not results["documents"][0]:
-        return ""
-
-    memory_lines = []
-    for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
-        memory_lines.append(f"User said: {doc}\nYou replied: {meta['sherlock_response']}")
-
-    return "\n\n".join(memory_lines)
-
-
-intents = discord.Intents.default()
-intents.message_content = True
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-
-def _deepseek_chat(user_text: str, guild_id: int) -> str:
-    # Retrieve relevant past conversations from this server's memory
-    memories = retrieve_memories(guild_id, user_text)
-
-    # Build system prompt — inject memories if they exist
-    if memories:
-        full_system = (
-            SYSTEM_PROMPT
-            + f"\n\n--- Server Memory (past conversations) ---\n{memories}\n---"
+    def _register_commands(self) -> None:
+        self.tree.add_command(
+            app_commands.Command(name="ping", description="Check if the bot is alive", callback=self.ping)
         )
-    else:
-        full_system = SYSTEM_PROMPT
+        sherlock_command = app_commands.Command(
+            name="sherlock", description="Ask Sherlock a question", callback=self.sherlock_command
+        )
+        app_commands.describe(question="What should Sherlock analyze?")(sherlock_command)
+        self.tree.add_command(sherlock_command)
+        self.tree.add_command(
+            app_commands.Command(
+                name="set_home_channel",
+                description="Set the server's always-on channel",
+                callback=self.set_home_channel,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name="disable_home_channel",
+                description="Disable the always-on channel for this server",
+                callback=self.disable_home_channel,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name="status",
+                description="Show current Sherlock bot configuration",
+                callback=self.status,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name="clear_memory",
+                description="Wipe Sherlock's memory for this server",
+                callback=self.clear_memory,
+            )
+        )
 
-    resp = deepseek.chat.completions.create(
-        model=DEEPSEEK_MODEL,
-        messages=[
-            {"role": "system", "content": full_system},
-            {"role": "user", "content": user_text},
-        ],
-        temperature=0.85,
-        max_tokens=180,
+    async def setup_hook(self) -> None:
+        for guild_id in self.config.dev_guild_ids:
+            guild = discord.Object(id=guild_id)
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+
+    async def on_ready(self) -> None:
+        print(f"Logged in as {self.user} (id={self.user.id})")
+        print(
+            "Slash commands synced to guilds: "
+            f"{', '.join(str(guild_id) for guild_id in self.config.dev_guild_ids)}."
+        )
+
+    async def ping(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message("pong", ephemeral=True)
+
+    async def sherlock_command(
+        self, interaction: discord.Interaction, question: str
+    ) -> None:
+        guild_id = interaction.guild.id if interaction.guild else 0
+        reply = await self.sherlock.reply(question, guild_id)
+        await interaction.response.send_message(reply)
+
+    async def set_home_channel(
+        self, interaction: discord.Interaction, channel: discord.TextChannel
+    ) -> None:
+        if not interaction.guild:
+            await self._require_guild(interaction)
+            return
+        self.settings.set_home_channel_id(interaction.guild.id, channel.id)
+        await interaction.response.send_message(
+            f"Home channel set to {channel.mention} for this server.", ephemeral=True
+        )
+
+    async def disable_home_channel(self, interaction: discord.Interaction) -> None:
+        if not interaction.guild:
+            await self._require_guild(interaction)
+            return
+        self.settings.set_home_channel_id(interaction.guild.id, None)
+        await interaction.response.send_message(
+            "Home channel disabled for this server.", ephemeral=True
+        )
+
+    async def status(self, interaction: discord.Interaction) -> None:
+        if not interaction.guild:
+            await self._require_guild(interaction)
+            return
+        home_id = self.settings.get_home_channel_id(interaction.guild.id)
+        home_text = f"<#{home_id}>" if home_id else "Not set"
+        await interaction.response.send_message(
+            f"Server: **{interaction.guild.name}**\n"
+            f"Home channel: **{home_text}**\n"
+            f"Guild ID: `{interaction.guild.id}`\n"
+            f"Memories stored: **{self.memory.count(interaction.guild.id)}**",
+            ephemeral=True,
+        )
+
+    async def clear_memory(self, interaction: discord.Interaction) -> None:
+        if not interaction.guild:
+            await self._require_guild(interaction)
+            return
+        self.memory.clear(interaction.guild.id)
+        await interaction.response.send_message(
+            "Memory wiped. I have deleted my mind palace for this server. A fresh tragedy.",
+            ephemeral=True,
+        )
+
+    async def _require_guild(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(
+            "This command can only be used in a server.", ephemeral=True
+        )
+
+    async def should_respond(self, message: discord.Message) -> bool:
+        if message.author.bot or not message.guild:
+            return False
+        if self.user and self.user in message.mentions:
+            return True
+        home_channel_id = self.settings.get_home_channel_id(message.guild.id)
+        if home_channel_id and message.channel.id == home_channel_id:
+            return True
+        if message.reference and self.user:
+            referenced = message.reference.resolved
+            if isinstance(referenced, discord.Message):
+                return referenced.author.id == self.user.id
+            if message.reference.message_id:
+                try:
+                    referenced = await message.channel.fetch_message(
+                        message.reference.message_id
+                    )
+                except (
+                    discord.NotFound,
+                    discord.Forbidden,
+                    discord.HTTPException,
+                    AttributeError,
+                ):
+                    referenced = None
+                return bool(referenced and referenced.author.id == self.user.id)
+        return False
+
+    async def on_message(self, message: discord.Message) -> None:
+        if await self.should_respond(message):
+            guild_id = message.guild.id if message.guild else 0
+            reply = await self.sherlock.reply(message.content, guild_id)
+            await message.channel.send(reply)
+        await self.process_commands(message)
+
+
+def create_bot(config: AppConfig | None = None) -> SherlockBot:
+    config = config or AppConfig.from_env()
+    memory = ConversationMemory(config.memory_path)
+    return SherlockBot(
+        config=config,
+        settings=ServerSettings(config.settings_path),
+        memory=memory,
+        sherlock=SherlockService(
+            api_key=config.deepseek_api_key,
+            base_url=config.deepseek_base_url,
+            model=config.deepseek_model,
+            memory=memory,
+        ),
     )
-    response_text = resp.choices[0].message.content.strip()
-
-    # Store this exchange in memory after responding
-    store_memory(guild_id, user_text, response_text)
-
-    return response_text
 
 
-async def sherlock_reply(text: str, guild_id: int) -> str:
-    if not DEEPSEEK_API_KEY:
-        return "DeepSeek is not configured. Set DEEPSEEK_API_KEY in .env."
+def main() -> None:
+    config = AppConfig.from_env()
+    config.validate()
+    bot = create_bot(config)
     try:
-        return await asyncio.to_thread(_deepseek_chat, text, guild_id)
-    except Exception as e:
-        return f"DeepSeek error: {type(e).__name__}: {e}"
+        bot.run(config.discord_token)
+    except discord.LoginFailure as exc:
+        raise RuntimeError(
+            "Discord rejected DISCORD_BOT_TOKEN. Generate a new token in the "
+            "Discord Developer Portal, update .env, and restart the bot. "
+            "Use the bot token itself, without a 'Bot ' prefix."
+        ) from exc
 
 
-@bot.event
-async def on_ready():
-    for guild_id in DEV_GUILD_IDS:
-        guild = discord.Object(id=guild_id)
-        bot.tree.copy_global_to(guild=guild)
-        await bot.tree.sync(guild=guild)
-    print(f"Logged in as {bot.user} (id={bot.user.id})")
-    print(f"Slash commands synced to guilds: {', '.join(str(guild_id) for guild_id in DEV_GUILD_IDS)}.")
-
-
-# --- Slash commands ---
-
-@bot.tree.command(name="ping", description="Check if the bot is alive")
-async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message("pong", ephemeral=True)
-
-
-@bot.tree.command(name="sherlock", description="Ask Sherlock a question")
-@app_commands.describe(question="What should Sherlock analyze?")
-async def sherlock_cmd(interaction: discord.Interaction, question: str):
-    guild_id = interaction.guild.id if interaction.guild else 0
-    reply = await sherlock_reply(question, guild_id)
-    await interaction.response.send_message(reply)
-
-
-@bot.tree.command(name="set_home_channel", description="Set the server's always-on channel")
-@app_commands.describe(channel="Channel where Sherlock should respond to every message")
-async def set_home_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    if not interaction.guild:
-        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
-        return
-    set_home_channel_id(interaction.guild.id, channel.id)
-    await interaction.response.send_message(
-        f"Home channel set to {channel.mention} for this server.", ephemeral=True
-    )
-
-
-@bot.tree.command(name="disable_home_channel", description="Disable the always-on channel for this server")
-async def disable_home_channel(interaction: discord.Interaction):
-    if not interaction.guild:
-        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
-        return
-    set_home_channel_id(interaction.guild.id, None)
-    await interaction.response.send_message("Home channel disabled for this server.", ephemeral=True)
-
-
-@bot.tree.command(name="status", description="Show current Sherlock bot configuration")
-async def status(interaction: discord.Interaction):
-    if not interaction.guild:
-        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
-        return
-    home_id = get_home_channel_id(interaction.guild.id)
-    home_text = f"<#{home_id}>" if home_id else "Not set"
-
-    # Show how many memories this server has stored
-    collection = get_server_collection(interaction.guild.id)
-    memory_count = collection.count()
-
-    await interaction.response.send_message(
-        f"Server: **{interaction.guild.name}**\n"
-        f"Home channel: **{home_text}**\n"
-        f"Guild ID: `{interaction.guild.id}`\n"
-        f"Memories stored: **{memory_count}**",
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(name="clear_memory", description="Wipe Sherlock's memory for this server")
-async def clear_memory(interaction: discord.Interaction):
-    if not interaction.guild:
-        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
-        return
-    # Delete and recreate the collection to wipe it clean
-    collection_name = f"guild_{interaction.guild.id}"
-    chroma_client.delete_collection(name=collection_name)
-    chroma_client.get_or_create_collection(name=collection_name)
-    await interaction.response.send_message(
-        "Memory wiped. I have deleted my mind palace for this server. A fresh tragedy.", ephemeral=True
-    )
-
-
-# --- Message triggers ---
-
-async def should_respond(message: discord.Message) -> bool:
-    if message.author.bot:
-        return False
-    if not message.guild:
-        return False
-    if bot.user and bot.user in message.mentions:
-        return True
-    home_id = get_home_channel_id(message.guild.id)
-    if home_id and message.channel.id == home_id:
-        return True
-    if message.reference and bot.user:
-        if isinstance(message.reference.resolved, discord.Message):
-            if message.reference.resolved.author.id == bot.user.id:
-                return True
-        elif message.reference.message_id:
-            try:
-                referenced = await message.channel.fetch_message(message.reference.message_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
-                referenced = None
-            if referenced and referenced.author.id == bot.user.id:
-                return True
-    return False
-
-
-@bot.event
-async def on_message(message: discord.Message):
-    if await should_respond(message):
-        guild_id = message.guild.id if message.guild else 0
-        reply = await sherlock_reply(message.content, guild_id)
-        await message.channel.send(reply)
-    await bot.process_commands(message)
-
-
-if not TOKEN:
-    raise RuntimeError("DISCORD_BOT_TOKEN not set.")
-try:
-    bot.run(TOKEN)
-except discord.LoginFailure as exc:
-    raise RuntimeError(
-        "Discord rejected DISCORD_BOT_TOKEN. Generate a new token in the "
-        "Discord Developer Portal, update .env, and restart the bot. "
-        "Use the bot token itself, without a 'Bot ' prefix."
-    ) from exc
+if __name__ == "__main__":
+    main()

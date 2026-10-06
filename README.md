@@ -38,14 +38,18 @@ Most standard chat bots treat every interaction as an isolated session. **Sherlo
 
 ```text
 sherlock-bot/
-├── cogs/              # Modular bot extensions & command groups
-├── database/          # ChromaDB persistence logic & vector schemas
-├── bot.py             # Main entry point, event listeners, & initialization
-├── config.py          # Environment configuration & credential loaders
-├── requirements.txt   # Locked project dependencies
-└── .env.example       # Template for required environme
-nt variables
+├── bot.py             # Discord bot, commands, and message events
+├── config.py          # Environment-backed application configuration
+├── memory.py          # Per-server ChromaDB conversation memory
+├── settings.py        # Persistent per-server channel settings
+├── sherlock.py        # DeepSeek response and prompt service
+└── requirements.txt   # Project dependencies
 ```
+
+The runtime is organized around small objects with one responsibility:
+`SherlockBot` coordinates Discord events, `SherlockService` generates replies,
+`ConversationMemory` owns vector storage, and `ServerSettings` owns JSON
+configuration. Run the application with `python bot.py`.
 
 ### Discord token setup
 
